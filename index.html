@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Trading Companion</title>
+<style>
+  :root {
+    --bg: #0e1117; --panel: #161b22; --border: #2a2f3a; --text: #e6e6e6;
+    --muted: #8b949e; --green: #3fb950; --red: #f85149; --amber: #d29922; --blue: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { padding: 14px 18px; border-bottom: 1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+  header h1 { font-size: 16px; margin:0; font-weight:600; }
+  .status { font-size:12px; padding:3px 10px; border-radius:12px; }
+  .status.connected { background: rgba(63,185,80,.15); color: var(--green); }
+  .status.disconnected { background: rgba(248,81,73,.15); color: var(--red); }
+  .layout { display:grid; grid-template-columns: 1fr; gap: 12px; padding: 14px; max-width: 900px; margin: 0 auto; }
+  @media (min-width: 760px) { .layout { grid-template-columns: 1.3fr 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+  select { background:#0b0e14; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font-size:13px; }
+  .state-badge { display:inline-block; padding:6px 12px; border-radius:6px; font-weight:700; font-size:15px; }
+  .state-NO_SETUP { background:#2a2f3a; color:var(--muted); }
+  .state-WATCH { background: rgba(210,153,34,.18); color: var(--amber); }
+  .state-WAIT_CONFIRM { background: rgba(88,166,255,.18); color: var(--blue); }
+  .state-CONFIRMED_BUY { background: rgba(63,185,80,.18); color: var(--green); }
+  .state-CONFIRMED_SELL { background: rgba(248,81,73,.18); color: var(--red); }
+  .state-INVALIDATED { background: rgba(248,81,73,.10); color: var(--red); }
+  table { width:100%; border-collapse: collapse; font-size: 13px; }
+  td { padding: 4px 0; border-bottom: 1px solid var(--border); }
+  td.k { color: var(--muted); width: 40%; }
+  #log { max-height: 340px; overflow-y:auto; font-size: 13px; }
+  .log-item { padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .log-item .t { color: var(--muted); font-size: 11px; }
+  .voice-controls { display:flex; gap:8px; align-items:center; margin-top:10px; }
+  button { background:#21262d; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer; }
+  button:hover { background:#30363d; }
+  .muted { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🎙️ AI Trading Companion</h1>
+  <span id="conn" class="status disconnected">DATA DISCONNECTED</span>
+</header>
+
+<div class="layout">
+  <div class="card">
+    <h2>Live State — <select id="symbolSelect"><option>Waiting for data…</option></select></h2>
+    <div id="stateBadge" class="state-badge state-NO_SETUP">NO SETUP</div>
+    <table style="margin-top:12px;">
+      <tr><td class="k">Direction</td><td id="fDirection">—</td></tr>
+      <tr><td class="k">HTF bias</td><td id="fHtf">—</td></tr>
+      <tr><td class="k">Zone</td><td id="fZone">—</td></tr>
+      <tr><td class="k">Entry</td><td id="fEntry">—</td></tr>
+      <tr><td class="k">Invalidation</td><td id="fInv">—</td></tr>
+      <tr><td class="k">TP1 / TP2</td><td id="fTp">—</td></tr>
+      <tr><td class="k">Last price</td><td id="fPrice">—</td></tr>
+      <tr><td class="k">Last update</td><td id="fTime">—</td></tr>
+    </table>
+    <div class="voice-controls">
+      <button id="btnMute">🔊 Voice on</button>
+      <button id="btnTest">Test voice</button>
+      <span class="muted">Speaks automatically on every state change.</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Event log / journal</h2>
+    <div id="log"><div class="muted">No events yet — waiting for your TradingView webhook.</div></div>
+  </div>
+</div>
+
+<script>
+const bySymbol = {};
+let currentSymbol = null;
+let voiceOn = true;
+let lastSpokenKey = null;
+
+const el = id => document.getElementById(id);
+
+function pickVoice() {
+  const voices = speechSynthesis.getVoices();
+  return voices.find(v => /en/i.test(v.lang) && /female|Samantha|Google US English/i.test(v.name)) || voices.find(v => /en/i.test(v.lang)) || voices[0];
+}
+
+function speak(text) {
+  if (!voiceOn || !('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 0.95; u.pitch = 0.95; u.volume = 1;
+  const v = pickVoice(); if (v) u.voice = v;
+  speechSynthesis.speak(u);
+}
+
+function fmt(n) { return (n === null || n === undefined) ? '—' : Number(n).toLocaleString(undefined, {maximumFractionDigits: 5}); }
+
+function render(sym) {
+  const e = bySymbol[sym];
+  if (!e) return;
+  const badge = el('stateBadge');
+  badge.textContent = e.state.replace('_', ' ');
+  badge.className = 'state-badge state-' + e.state;
+  el('fDirection').textContent = e.direction || '—';
+  el('fHtf').textContent = e.htfBias || '—';
+  el('fZone').textContent = (e.zoneTop && e.zoneBot) ? `${fmt(e.zoneBot)} – ${fmt(e.zoneTop)}` : '—';
+  el('fEntry').textContent = fmt(e.entry);
+  el('fInv').textContent = fmt(e.invalidation);
+  el('fTp').textContent = `${fmt(e.tp1)} / ${fmt(e.tp2)}`;
+  el('fPrice').textContent = fmt(e.price);
+  el('fTime').textContent = e.receivedAt ? new Date(e.receivedAt).toLocaleTimeString() : '—';
+}
+
+function addLogEntry(e) {
+  const log = el('log');
+  if (log.querySelector('.muted')) log.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'log-item';
+  div.innerHTML = `<div class="t">${new Date(e.receivedAt).toLocaleTimeString()} — ${e.symbol} (${e.timeframe || ''})</div>
+    <div><strong>${e.state.replace('_',' ')}</strong>${e.direction && e.direction !== 'NONE' ? ' · ' + e.direction : ''}</div>
+    <div class="muted">${e.reason || ''}</div>`;
+  log.prepend(div);
+}
+
+function updateSymbolOptions() {
+  const sel = el('symbolSelect');
+  const syms = Object.keys(bySymbol);
+  if (syms.length === 0) return;
+  const existing = new Set([...sel.options].map(o => o.value));
+  for (const s of syms) {
+    if (!existing.has(s)) {
+      const opt = document.createElement('option');
+      opt.value = s; opt.textContent = s;
+      sel.appendChild(opt);
+    }
+  }
+  if (!currentSymbol) { currentSymbol = syms[0]; sel.value = currentSymbol; }
+}
+
+el('symbolSelect').addEventListener('change', e => { currentSymbol = e.target.value; render(currentSymbol); });
+el('btnMute').addEventListener('click', () => {
+  voiceOn = !voiceOn;
+  el('btnMute').textContent = voiceOn ? '🔊 Voice on' : '🔇 Voice off';
+});
+el('btnTest').addEventListener('click', () => speak('Voice companion connected and ready.'));
+
+function handleEvent(e) {
+  bySymbol[e.symbol] = e;
+  updateSymbolOptions();
+  addLogEntry(e);
+  const key = e.symbol + '|' + e.state + '|' + (e.direction || '');
+  if (key !== lastSpokenKey) {
+    speak(`${e.symbol}: ${e.reason || e.state}`);
+    lastSpokenKey = key;
+  }
+  if (e.symbol === currentSymbol) render(currentSymbol);
+}
+
+const es = new EventSource('/events');
+es.onopen = () => { el('conn').textContent = 'DATA CONNECTED'; el('conn').className = 'status connected'; };
+es.onerror = () => { el('conn').textContent = 'DATA DISCONNECTED'; el('conn').className = 'status disconnected'; };
+es.onmessage = (msg) => {
+  const data = JSON.parse(msg.data);
+  if (data.type === 'snapshot') {
+    Object.assign(bySymbol, data.latestBySymbol);
+    updateSymbolOptions();
+    (data.eventLog || []).slice(-20).forEach(addLogEntry);
+    if (currentSymbol) render(currentSymbol);
+  } else if (data.type === 'update') {
+    handleEvent(data.event);
+  }
+};
+</script>
+</body>
+</html>
